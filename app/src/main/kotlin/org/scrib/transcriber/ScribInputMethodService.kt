@@ -83,13 +83,15 @@ class ScribInputMethodService : InputMethodService() {
         return fresh
     }
 
-    // Showing the keyboard is not the same as wanting to talk: the microphone opens on the key
-    // below and nowhere else, so switching here by accident never starts recording.
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         notice = null
         keyboardTargetsCache = null
         render()
+        if (stage == Stage.Idle && ModelManager.keyboardAutoListen(this) &&
+            blocker() == Blocker.None) {
+            listen()
+        }
     }
 
     override fun onFinishInputView(finishingInput: Boolean) {

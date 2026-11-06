@@ -59,6 +59,19 @@ universal apk and once per architecture — `arm64-v8a` for nearly every phone,
 Waydroid. Every one of them carries the same version code, so switching between
 them needs no uninstall.
 
+## Automatic keyboard listening
+
+Enable **Settings → Listen when keyboard opens** to start dictation as soon as
+the Scrib keyboard opens, without tapping the microphone. This is off by default
+and the choice is saved across app restarts.
+
+Grant microphone permission and select a transcription model or endpoint first.
+If either is missing, the keyboard keeps its existing setup prompt; opening it
+does not launch the app automatically. Closing or switching away from the
+keyboard stops recording. The microphone button still stops a running take.
+With a remote endpoint selected, automatic recordings are uploaded to that
+server just like manually started recordings.
+
 ## For developers
 
 Any app can use Scrib as an offline transcriber through the open **Open
