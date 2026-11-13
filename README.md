@@ -1,3 +1,41 @@
+# scribfork distribution
+
+This branch builds **scribfork** with application ID
+`org.scrib.transcriber.scribfork`, so it installs alongside official Scrib and
+Scrib Debug. Its keyboard is also named **scribfork**. App data, permissions,
+enabled keyboards, and downloaded models are separate from the official app.
+
+Branch separation:
+
+- `keyboard-auto-listen-pr`: the automatic-listening feature and its usage docs,
+  based on upstream `23rd/Scrib` master. Use this branch for the upstream PR.
+- `scribfork`: the feature plus fork-only application identity and these
+  distribution instructions. Do not submit this branch upstream.
+
+Build the ARM64 release with `./gradlew :app:assembleRelease`. The result is
+`app/build/outputs/apk/release/app-release-unsigned.apk`. Sign it with your own
+release key, not the debug key:
+
+```sh
+tools="$ANDROID_HOME/build-tools/35.0.0"
+mkdir -p dist
+"$tools/zipalign" -f -P 16 4 \
+  app/build/outputs/apk/release/app-release-unsigned.apk \
+  dist/scribfork-aligned.apk
+"$tools/apksigner" sign --ks "$HOME/.local/share/scribfork/release.jks" \
+  --ks-key-alias scribfork \
+  --ks-pass "file:$HOME/.local/share/scribfork/release-password" \
+  --out dist/scribfork.apk dist/scribfork-aligned.apk
+"$tools/apksigner" verify --verbose dist/scribfork.apk
+```
+
+Keep the keystore and password outside the repository, back them up securely,
+and reuse the same key for future updates. Losing it means existing installs
+cannot be updated in place. The upstream release workflow is not the fork
+distribution process: its manual run checks out an upstream release tag.
+
+---
+
 # <a href="https://f-droid.org/packages/org.scrib.transcriber/" title="Scrib on F-Droid"><img src="images/icon.png" width="34" alt="Scrib on F-Droid"></a> <a href="https://github.com/23rd/Scrib/releases/latest" title="Scrib Max on GitHub releases"><img src="images/icon-max.png" width="34" alt="Scrib Max on GitHub releases"></a> Scrib
 
 [![F-Droid](https://img.shields.io/f-droid/v/org.scrib.transcriber.svg)](https://f-droid.org/packages/org.scrib.transcriber/)
