@@ -29,10 +29,12 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.PopupMenu
 import org.opentranscribe.api.ErrorType
 import org.opentranscribe.api.ITranscriptionCallback
 import org.opentranscribe.api.StreamRequest
 import org.opentranscribe.api.TranscriptionError
+import java.io.File
 import java.util.concurrent.Executors
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -43,7 +45,7 @@ import kotlin.math.sqrt
 // Whisper decodes whole utterances, so words appear at the pauses rather than one at a time.
 class ScribInputMethodService : InputMethodService() {
 
-    private enum class Stage { Idle, Listening, Finishing }
+    private enum class Stage { Idle, Switching, Listening, Finishing }
 
     private enum class Blocker { None, Microphone, Model }
 
@@ -65,6 +67,11 @@ class ScribInputMethodService : InputMethodService() {
 
     private var notice: String? = null
     private var keyboardTargetsCache: List<KeyboardLayoutTarget>? = null
+    private var modelPicker: PopupMenu? = null
+    private var pendingModel: ModelChoice? = null
+    private var resumeAfterSwitch = false
+
+    private data class ModelChoice(val fileName: String?, val name: String)
 
     private companion object {
         const val LINGER_AFTER_STOP_MS = 250L
@@ -79,6 +86,7 @@ class ScribInputMethodService : InputMethodService() {
         fresh.onKeyboardLayout = { target -> leave(target) }
         fresh.onBackspace = { sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL) }
         fresh.onCustomKey = { snippet -> insertCustom(snippet) }
+        fresh.onModel = { anchor -> showModelPicker(anchor) }
         view = fresh
         return fresh
     }
@@ -94,6 +102,7 @@ class ScribInputMethodService : InputMethodService() {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
+        modelPicker?.dismiss()
         abandon()
     }
 
@@ -133,6 +142,7 @@ class ScribInputMethodService : InputMethodService() {
     }
 
     override fun onDestroy() {
+        modelPicker?.dismiss()
         abandon()
         background.shutdown()
         view = null
@@ -140,6 +150,8 @@ class ScribInputMethodService : InputMethodService() {
     }
 
     private fun act() {
+        modelPicker?.dismiss()
+        if (stage == Stage.Switching) return
         if (BenchmarkBatchGate.isActive) return
         when (blocker()) {
             // An input method cannot ask for a permission itself, so the app is opened to do it.
@@ -148,7 +160,100 @@ class ScribInputMethodService : InputMethodService() {
             Blocker.None -> when (stage) {
                 Stage.Idle -> listen()
                 Stage.Listening -> finish()
-                Stage.Finishing -> Unit
+                Stage.Finishing, Stage.Switching -> Unit
+            }
+        }
+    }
+
+    private fun modelChoices(): List<ModelChoice> {
+        val choices = mutableListOf<ModelChoice>()
+        if (BuildConfig.LOCAL_MODELS) {
+            ModelManager.installedFileNames(this).forEach { fileName ->
+                val name = ModelCatalog.byFileName(fileName)?.displayName
+                    ?: fileName.removePrefix("ggml-").removeSuffix(".bin").removeSuffix(".gguf")
+                choices.add(ModelChoice(fileName, name))
+            }
+            ModelManager.externalModel(this)?.let { (name, path) ->
+                val file = File(path)
+                if (file.isFile && file.canRead()) {
+                    choices.add(ModelChoice(ModelManager.EXTERNAL_PREFIX + name, name))
+                }
+            }
+            SherpaPlugins.plugin?.modelRows(this, ModelManager.activeFileName(this))?.forEach {
+                choices.add(ModelChoice(it.id, it.name))
+            }
+        }
+        choices.sortBy { it.name.lowercase() }
+        EndpointPlugins.plugin?.takeIf { it.isConfigured(this) }?.let {
+            choices.add(ModelChoice(null, getString(R.string.ime_remote_model, it.displayName(this))))
+        }
+        return choices
+    }
+
+    private fun showModelPicker(anchor: View) {
+        if (BenchmarkBatchGate.isActive || (stage != Stage.Idle && stage != Stage.Listening)) return
+        val choices = modelChoices()
+        if (choices.isEmpty()) {
+            notice = getString(R.string.ime_no_models)
+            render()
+            return
+        }
+        modelPicker?.dismiss()
+        val active = ModelManager.activeFileName(this)
+        val remoteActive = EndpointPlugins.plugin?.isActive(this) == true
+        val picker = PopupMenu(this, anchor)
+        choices.forEachIndexed { index, choice ->
+            picker.menu.add(0, index, index, choice.name).isChecked =
+                if (choice.fileName == null) remoteActive else choice.fileName == active
+        }
+        picker.menu.setGroupCheckable(0, true, true)
+        picker.setOnMenuItemClickListener { item ->
+            val choice = choices[item.itemId]
+            if (!item.isChecked && !BenchmarkBatchGate.isActive) {
+                if (stage == Stage.Listening) {
+                    pendingModel = choice
+                    finish()
+                } else if (stage == Stage.Idle) {
+                    switchModel(choice, resume = false)
+                }
+            }
+            true
+        }
+        picker.setOnDismissListener { if (modelPicker === picker) modelPicker = null }
+        modelPicker = picker
+        picker.show()
+    }
+
+    private fun switchModel(choice: ModelChoice, resume: Boolean) {
+        if (BenchmarkBatchGate.isActive || modelChoices().none { it.fileName == choice.fileName }) {
+            notice = getString(R.string.ime_no_models)
+            render()
+            return
+        }
+        stage = Stage.Switching
+        resumeAfterSwitch = resume
+        notice = null
+        render()
+        val app = applicationContext
+        background.execute {
+            val failure = try {
+                if (choice.fileName == null) {
+                    EndpointPlugins.plugin?.setActive(app, true)
+                } else {
+                    ModelManager.setActive(app, choice.fileName)
+                    TranscriptionEngine.releaseAll(app)
+                }
+                null
+            } catch (e: Exception) {
+                brief(e.message) ?: getString(R.string.transcribe_failed)
+            }
+            main.post {
+                val shouldResume = resumeAfterSwitch
+                resumeAfterSwitch = false
+                stage = Stage.Idle
+                notice = failure
+                render()
+                if (failure == null && shouldResume && blocker() == Blocker.None) listen()
             }
         }
     }
@@ -203,6 +308,10 @@ class ScribInputMethodService : InputMethodService() {
 
     // Drops the take, tail and all. The cancelled report that follows belongs to a spent session.
     private fun abandon() {
+        if (stage == Stage.Switching) {
+            resumeAfterSwitch = false
+            return
+        }
         if (stage == Stage.Idle) {
             return
         }
@@ -217,6 +326,7 @@ class ScribInputMethodService : InputMethodService() {
 
     private fun reset() {
         session++
+        pendingModel = null
         stage = Stage.Idle
         stream = null
         microphone = null
@@ -228,9 +338,14 @@ class ScribInputMethodService : InputMethodService() {
 
     private fun settled(message: String?) {
         val complete = stage == Stage.Finishing && message == null
+        val nextModel = pendingModel
         reset()
         notice = message
         render()
+        if (complete && nextModel != null) {
+            switchModel(nextModel, resume = true)
+            return
+        }
         if (complete) {
             keyboard()
         }
@@ -386,6 +501,7 @@ class ScribInputMethodService : InputMethodService() {
     private fun render() {
         val blocker = blocker()
         val message = notice ?: when {
+            stage == Stage.Switching -> getString(R.string.ime_switching_model)
             blocker == Blocker.Microphone -> getString(R.string.record_denied)
             blocker == Blocker.Model -> getString(
                 if (BuildConfig.ENDPOINTS_ONLY) R.string.ime_needs_endpoint else R.string.ime_needs_model
@@ -398,8 +514,9 @@ class ScribInputMethodService : InputMethodService() {
             message = message,
             alert = notice != null || blocker != Blocker.None,
             listening = stage == Stage.Listening,
-            enabled = stage != Stage.Finishing,
+            enabled = stage == Stage.Idle || stage == Stage.Listening,
             modelName = ModelManager.activeDisplayName(this),
+            modelEnabled = stage == Stage.Idle || stage == Stage.Listening,
             keyboardTargets = keyboardTargets(),
             customKeys = KeyboardLayouts.customKeys(this)
         )
@@ -420,6 +537,7 @@ class ScribInputMethodService : InputMethodService() {
     var onKeyboardLayout: (KeyboardLayoutTarget) -> Unit = {}
     var onBackspace: () -> Unit = {}
     var onCustomKey: (String) -> Unit = {}
+    var onModel: (View) -> Unit = {}
 
     private val status = TextView(context)
     private val model = TextView(context)
@@ -455,6 +573,9 @@ class ScribInputMethodService : InputMethodService() {
         model.gravity = Gravity.CENTER
         model.setTextColor(quietColor)
         model.alpha = 0.75f
+        model.minimumHeight = dp(48)
+        model.setPadding(dp(8), dp(8), dp(8), dp(8))
+        model.setOnClickListener { onModel(it) }
         addView(model, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
             topMargin = dp(2)
         })
@@ -512,13 +633,17 @@ class ScribInputMethodService : InputMethodService() {
         listening: Boolean,
         enabled: Boolean,
         modelName: String?,
+        modelEnabled: Boolean,
         keyboardTargets: List<KeyboardLayoutTarget>,
         customKeys: List<String>
     ) {
         status.text = message
         status.setTextColor(if (alert) alertColor else quietColor)
-        model.text = modelName ?: ""
-        model.visibility = if (modelName.isNullOrEmpty()) View.GONE else View.VISIBLE
+        val modelLabel = modelName ?: context.getString(R.string.ime_choose_model)
+        model.text = context.getString(R.string.ime_model_dropdown, modelLabel)
+        model.contentDescription = context.getString(R.string.ime_change_model, modelLabel)
+        model.isEnabled = modelEnabled
+        model.alpha = if (modelEnabled) 0.75f else 0.4f
         record.glyph = if (listening) RoundKey.Glyph.Stop else RoundKey.Glyph.Mic
         record.contentDescription = context.getString(if (listening) R.string.action_stop else R.string.ime_speak)
         record.isEnabled = enabled

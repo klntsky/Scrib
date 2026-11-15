@@ -115,6 +115,12 @@
     <string name="ime_ready">Tap the microphone to dictate.</string>
     <string name="ime_listening">Listening… text appears at every pause.</string>
     <string name="ime_finishing">Transcribing the last words…</string>
+    <string name="ime_choose_model">Choose a model</string>
+    <string name="ime_model_dropdown">%1$s ▾</string>
+    <string name="ime_change_model">Change transcription model: %1$s</string>
+    <string name="ime_remote_model">Remote: %1$s</string>
+    <string name="ime_switching_model">Switching transcription model…</string>
+    <string name="ime_no_models">No ready models available. Add a model or configure an endpoint in Scrib first.</string>
     <string name="ime_speak">Speak</string>
     <string name="ime_backspace">Backspace</string>
     <string name="ime_keyboard">Keyboard</string>
